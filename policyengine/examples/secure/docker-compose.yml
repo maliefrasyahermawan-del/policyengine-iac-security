@@ -1,0 +1,90 @@
+version: '3.8'
+
+services:
+  app:
+    image: myapp:latest
+    privileged: false             # SECURE: no privileged mode
+    user: '1000:1000'            # SECURE: non-root user
+    read_only: true              # SECURE: read-only filesystem
+    ports:
+      - "127.0.0.1:8080:8080"   # SECURE: bind to localhost only
+    security_opt:
+      - no-new-privileges:true   # SECURE: prevent privilege escalation
+    cap_drop:
+      - ALL                      # SECURE: drop all capabilities
+    cap_add:
+      - NET_BIND_SERVICE         # Only add what's needed
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    environment:
+      - NODE_ENV=production
+      - DB_PASSWORD=${DB_PASSWORD}  # SECURE: from .env or secret manager
+      - API_SECRET=${API_SECRET}    # SECURE: from environment
+    secrets:
+      - db_password
+    volumes:
+      - app_tmp:/tmp             # SECURE: only mount what is needed
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  database:
+    image: postgres:14
+    user: '999:999'             # SECURE: postgres non-root
+    ports: []                    # SECURE: no external port exposure
+    environment:
+      - POSTGRES_PASSWORD_FILE=/run/secrets/db_password  # SECURE: using secrets
+      - POSTGRES_DB=myapp
+    secrets:
+      - db_password
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  nginx:
+    image: nginx:latest
+    # network_mode: bridge (default, not host)
+    privileged: false            # SECURE: no privileged
+    user: '101:101'             # SECURE: nginx user
+    read_only: true
+    ports:
+      - "80:80"
+      - "443:443"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - nginx_cache:/var/cache/nginx
+      - nginx_run:/var/run
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt  # Never commit this file — add to .gitignore
+
+volumes:
+  db_data:
+  app_tmp:
+  nginx_cache:
+  nginx_run:

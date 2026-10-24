@@ -1,0 +1,12 @@
+.claude/
+.vscode/
+.idea/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+policyengine/reports/
+policyengine/uploads/
+policyengine/*.db

@@ -1,0 +1,943 @@
+================================================================================
+  PANDUAN LENGKAP POLICYENGINE
+  IaC Security Validation System
+================================================================================
+
+  Dibuat oleh : Alif
+  Versi       : 1.0
+  Tanggal     : 2026-06-30
+  Platform    : Windows 11 / Python 3.11
+
+================================================================================
+  DAFTAR ISI
+================================================================================
+
+  1. APA ITU POLICYENGINE?
+  2. FUNGSI DAN TUJUAN
+  3. ARSITEKTUR SISTEM
+  4. STRUKTUR FOLDER
+  5. INSTALASI LENGKAP (STEP BY STEP)
+  6. CARA MENGGUNAKAN — CLI
+  7. CARA MENGGUNAKAN — WEB UI
+  8. CARA MENGGUNAKAN — API
+  9. MEMAHAMI HASIL VALIDASI
+  10. MENULIS POLICY CUSTOM (OPA / REGO)
+  11. INTEGRASI CI/CD (GITHUB ACTIONS)
+  12. FITUR AI REMEDIATION (OPSIONAL)
+  13. TROUBLESHOOTING
+  14. REFERENSI DAN SUMBER BELAJAR
+
+================================================================================
+  1. APA ITU POLICYENGINE?
+================================================================================
+
+PolicyEngine adalah alat "shift-left security" untuk Infrastructure as Code (IaC).
+
+SHIFT-LEFT artinya: temukan masalah keamanan SEBELUM kode mencapai production,
+bukan setelah server sudah jalan dan data sudah bisa bocor.
+
+IaC (Infrastructure as Code) adalah cara mendefinisikan infrastruktur cloud
+(server, database, jaringan, dll) menggunakan file konfigurasi teks, bukan
+klik-klik manual di console AWS/GCP/Azure.
+
+Contoh file IaC yang di-scan PolicyEngine:
+  - main.tf          → Terraform (mendefinisikan resource AWS seperti S3, EC2, RDS)
+  - docker-compose.yml → Docker Compose (mendefinisikan container dan layanannya)
+
+MASALAH YANG DISELESAIKAN:
+  Tanpa PolicyEngine, konfigurasi berikut sering lolos ke production:
+  - S3 bucket tanpa enkripsi         → data tersimpan as-is, rentan jika ada breach
+  - Security group SSH terbuka dunia → siapa saja bisa coba brute-force ke server
+  - Container jalan sebagai root      → jika di-exploit, attacker dapat akses penuh
+  - IAM policy dengan wildcard (*)   → aplikasi punya izin lebih dari yang dibutuhkan
+  - Database accessible publik       → bisa diakses dari internet tanpa VPN
+
+PolicyEngine menangkap semua itu SEBELUM terraform apply atau docker-compose up.
+
+================================================================================
+  2. FUNGSI DAN TUJUAN
+================================================================================
+
+FUNGSI UTAMA:
+  [1] SCAN & DETECT
+      Membaca file .tf atau docker-compose.yml dan mendeteksi misconfiguration
+      keamanan menggunakan dua scanner:
+      - Checkov  : 1000+ check standar industri (CIS Benchmark, NIST, dll)
+      - OPA/Rego : custom rules yang kamu tulis sendiri
+
+  [2] AGGREGATE & SCORE
+      Menggabungkan hasil dari kedua scanner, menghilangkan duplikat,
+      dan memberi skor severity: CRITICAL / HIGH / MEDIUM / LOW
+
+  [3] DECIDE
+      Membuat keputusan otomatis:
+      - Ada CRITICAL atau HIGH violation → BLOCK (exit code 1, deployment dilarang)
+      - Hanya MEDIUM/LOW               → ALLOW (deployment diizinkan, dengan catatan)
+
+  [4] REMEDIATE
+      Untuk setiap violation, berikan saran perbaikan konkret:
+      - Penjelasan masalahnya
+      - Kode Terraform/Compose yang perlu ditambah/diubah
+      - Link ke dokumentasi resmi
+
+  [5] REPORT
+      Generate laporan dalam dua format:
+      - validation_report.json → untuk integrasi dengan tools lain (SIEM, ticketing)
+      - validation_report.html → untuk dibaca manusia, ada tombol expand per violation
+
+TUJUAN BISNIS:
+  - Mencegah security incident akibat misconfiguration
+  - Memastikan compliance (SOC2, ISO 27001, PCI-DSS) pada level infrastruktur
+  - Mempercepat review keamanan — engineer tahu masalah sebelum review manual
+  - Dokumentasi violation → audit trail
+
+================================================================================
+  3. ARSITEKTUR SISTEM
+================================================================================
+
+FLOW DATA LENGKAP:
+  ┌────────────────────────────────────────────────┐
+  │              INPUT                             │
+  │   File .tf atau docker-compose.yml             │
+  └────────────────────┬───────────────────────────┘
+                       │
+                       ▼
+  ┌────────────────────────────────────────────────┐
+  │           PolicyEngine Validator               │
+  │         (src/validator.py)                     │
+  │                                                │
+  │  ┌─────────────────┐  ┌─────────────────────┐ │
+  │  │  SCANNER 1      │  │  SCANNER 2          │ │
+  │  │  Checkov        │  │  OPA / Conftest     │ │
+  │  │                 │  │                     │ │
+  │  │ checkov -f file │  │ conftest test file  │ │
+  │  │ --output json   │  │ --policy policies/  │ │
+  │  │                 │  │ --output json       │ │
+  │  │ Built-in checks │  │ Custom Rego rules   │ │
+  │  │ (1000+ rules)   │  │ (tulis sendiri)     │ │
+  │  └────────┬────────┘  └──────────┬──────────┘ │
+  │           └──────────┬───────────┘            │
+  │                      ▼                        │
+  │  ┌────────────────────────────────────────┐   │
+  │  │         Aggregator                     │   │
+  │  │         (src/aggregator.py)            │   │
+  │  │                                        │   │
+  │  │  - Merge findings dari 2 scanner       │   │
+  │  │  - Deduplicate (hapus hasil sama)      │   │
+  │  │  - Enrich severity (CRITICAL/HIGH/...) │   │
+  │  │  - Sort by severity (Critical dulu)    │   │
+  │  └────────────────────┬───────────────────┘   │
+  │                       ▼                       │
+  │  ┌────────────────────────────────────────┐   │
+  │  │         Decision Engine                │   │
+  │  │         (bagian dari aggregator)       │   │
+  │  │                                        │   │
+  │  │  if CRITICAL > 0 OR HIGH > 0:          │   │
+  │  │      allow_deploy = False              │   │
+  │  │  else:                                 │   │
+  │  │      allow_deploy = True               │   │
+  │  └────────────────────┬───────────────────┘   │
+  │                       ▼                       │
+  │  ┌────────────────────────────────────────┐   │
+  │  │      Remediation Generator             │   │
+  │  │      (src/remediation.py)              │   │
+  │  │                                        │   │
+  │  │  Untuk tiap violation:                 │   │
+  │  │  1. Cari di REMEDIATION_TEMPLATES dict │   │
+  │  │  2. Match by check_id atau keyword     │   │
+  │  │  3. Jika --ai aktif: tanya Ollama      │   │
+  │  │  4. Fallback: template statis          │   │
+  │  └────────────────────┬───────────────────┘   │
+  │                       ▼                       │
+  │  ┌────────────────────────────────────────┐   │
+  │  │       Report Generator                 │   │
+  │  │       (src/report_generator.py)        │   │
+  │  │                                        │   │
+  │  │  → validation_report.json              │   │
+  │  │  → validation_report.html              │   │
+  │  └────────────────────────────────────────┘   │
+  └────────────────────────────────────────────────┘
+                       │
+         ┌─────────────┼─────────────┐
+         ▼             ▼             ▼
+   CLI Output     JSON Report   HTML Report
+  (terminal)     (reports/)    (reports/)
+  exit code      machine-      human-
+  0 / 1          readable      readable
+
+
+KOMPONEN DAN TANGGUNG JAWABNYA:
+
+  src/validator.py
+  ├── Orchestrator utama
+  ├── Memanggil checkov_runner + opa_runner secara berurutan
+  ├── Memanggil aggregator untuk merge hasil
+  ├── Memanggil remediation untuk enrich tiap finding
+  └── Memanggil report_generator untuk output file
+
+  src/checkov_runner.py
+  ├── Cek apakah checkov binary tersedia di PATH
+  ├── Jalankan: checkov -f <file> --output json --compact
+  ├── Parse JSON output dari Checkov
+  ├── Return list of findings dengan format standar
+  └── Graceful error jika Checkov tidak ada (tidak crash)
+
+  src/opa_runner.py
+  ├── Cek apakah conftest binary tersedia di PATH
+  ├── Jalankan: conftest test <file> --policy policies/ --output json
+  ├── Parse JSON output dari conftest
+  ├── Infer severity dari isi pesan (keyword matching)
+  └── Graceful error jika conftest tidak ada
+
+  src/aggregator.py
+  ├── Merge findings dari checkov + opa ke satu list
+  ├── Deduplicate berdasarkan (check_id, resource, message)
+  ├── Override severity berdasarkan check_id yang dikenal
+  ├── Hitung counts per severity dan per scanner
+  └── Tentukan allow_deploy (True/False)
+
+  src/remediation.py
+  ├── REMEDIATION_TEMPLATES: dict dengan 13+ template fix
+  ├── get_remediation(finding): lookup template by check_id atau keyword
+  ├── get_ai_remediation(finding): POST ke Ollama API, timeout 10s
+  └── enrich_findings_with_remediation(): tambahkan remediation ke tiap finding
+
+  src/report_generator.py
+  ├── generate_json_report(): tulis dict ke JSON file
+  ├── generate_html_report(): render Jinja2 template → HTML file
+  └── generate_reports(): panggil keduanya, return paths
+
+  cli.py
+  ├── argparse untuk parse argumen command line
+  ├── Panggil validate_file() dari src/validator.py
+  ├── Print hasil ke terminal dengan warna (ANSI)
+  └── sys.exit(0) jika PASS, sys.exit(1) jika FAIL
+
+  web/main.py
+  ├── FastAPI app dengan 4 endpoint:
+  │   GET  /          → upload form (index.html)
+  │   POST /validate  → proses file upload → tampilkan report.html
+  │   GET  /api/validate?file_path=... → JSON API untuk automation
+  │   GET  /download-report → download validation_report.json
+  └── File upload: simpan sementara di uploads/, hapus setelah scan
+
+  policies/*.rego
+  ├── Ditulis dalam bahasa Rego (OPA policy language)
+  ├── Package name menentukan scope (terraform.* atau docker.*)
+  ├── deny[msg] rules: jika kondisi terpenuhi → violation
+  └── conftest membaca semua .rego di folder policies/ secara otomatis
+
+================================================================================
+  4. STRUKTUR FOLDER
+================================================================================
+
+policyengine/
+│
+├── src/                         ← Kode utama Python
+│   ├── __init__.py
+│   ├── validator.py             ← Entry point untuk validasi
+│   ├── checkov_runner.py        ← Wrapper Checkov
+│   ├── opa_runner.py            ← Wrapper OPA/conftest
+│   ├── aggregator.py            ← Merge dan scoring
+│   ├── remediation.py           ← Saran perbaikan
+│   └── report_generator.py     ← Output HTML dan JSON
+│
+├── policies/                    ← Custom Rego policies
+│   ├── network_security.rego   ← SSH/RDP/port terbuka
+│   ├── encryption.rego         ← Enkripsi S3/RDS/EBS
+│   ├── container_security.rego ← Docker security
+│   ├── tagging.rego            ← Tag wajib
+│   └── iam_least_privilege.rego ← IAM wildcard
+│
+├── examples/                    ← File contoh untuk demo
+│   ├── insecure/
+│   │   ├── main.tf             ← Terraform dengan semua jenis vuln
+│   │   └── docker-compose.yml  ← Compose dengan vuln
+│   └── secure/
+│       ├── main.tf             ← Terraform yang sudah aman
+│       └── docker-compose.yml  ← Compose yang sudah aman
+│
+├── web/                         ← Web interface
+│   ├── main.py                  ← FastAPI application
+│   └── templates/
+│       ├── index.html           ← Halaman upload
+│       └── report.html          ← Halaman hasil
+│
+├── reports/                     ← OUTPUT (dibuat otomatis)
+│   ├── validation_report.json  ← Hasil scan JSON
+│   └── validation_report.html  ← Hasil scan HTML
+│
+├── uploads/                     ← File sementara upload (dibuat otomatis)
+├── cli.py                       ← Command Line Interface
+├── run.py                       ← Entry point web server
+├── requirements.txt             ← Python dependencies
+├── README.md                    ← Dokumentasi ringkas
+└── PANDUAN_PENGGUNAAN.txt       ← File ini
+
+================================================================================
+  5. INSTALASI LENGKAP (STEP BY STEP)
+================================================================================
+
+STEP 1: Pastikan Python 3.11 terinstall
+─────────────────────────────────────────
+  Buka PowerShell / Command Prompt:
+
+    python --version
+    # Harus: Python 3.11.x
+
+  Jika belum ada: https://www.python.org/downloads/release/python-3110/
+
+
+STEP 2: Masuk ke folder project
+─────────────────────────────────
+    cd "D:\Portofolio Cyber Alif\project 13 - Policy Enginer\policyengine"
+
+
+STEP 3: Install Python dependencies
+──────────────────────────────────────
+    pip install -r requirements.txt
+
+  Yang akan terinstall:
+  - checkov>=3.1.0        → scanner utama
+  - fastapi>=0.104.0      → web API
+  - uvicorn               → web server
+  - jinja2                → template HTML
+  - python-hcl2           → parse file Terraform
+  - httpx                 → call Ollama API (opsional)
+  - python-multipart      → file upload di web
+
+  Verifikasi Checkov:
+    checkov --version
+    # Contoh output: checkov 3.2.xx
+
+
+STEP 4: Download dan install conftest (untuk custom OPA policies)
+──────────────────────────────────────────────────────────────────
+  PENTING: Tanpa conftest, custom policy Rego tidak akan berjalan.
+  Checkov tetap berjalan normal.
+
+  a) Buka browser, download:
+     https://github.com/open-policy-agent/conftest/releases/latest
+     → Cari: conftest_Windows_x86_64.zip
+     → Download dan extract
+
+  b) Rename/copy conftest.exe ke folder yang ada di PATH.
+     Cara mudah: copy ke C:\Windows\System32\
+     Atau: buat folder C:\tools\ → copy conftest.exe ke sana
+           lalu tambahkan C:\tools\ ke Environment Variable PATH
+
+  c) Verifikasi:
+     conftest --version
+     # Contoh output: conftest v0.46.0
+
+
+STEP 5: Download OPA binary (opsional, digunakan conftest secara internal)
+────────────────────────────────────────────────────────────────────────────
+  Download:
+  https://github.com/open-policy-agent/opa/releases/latest/download/opa_windows_amd64.exe
+
+  Rename jadi: opa.exe
+  Taruh di PATH (sama seperti conftest.exe)
+
+  Verifikasi:
+    opa version
+
+
+STEP 6: Test instalasi lengkap
+────────────────────────────────
+  Jalankan validasi demo:
+
+    python cli.py validate examples/insecure/main.tf
+
+  Jika berhasil, kamu akan melihat output dengan daftar violations.
+  Jika ada peringatan "not available", cek kembali step 3 dan 4.
+
+================================================================================
+  6. CARA MENGGUNAKAN — CLI
+================================================================================
+
+FORMAT PERINTAH:
+  python cli.py validate <FILE> [OPSI]
+
+──────────────────────────────────────────────────────────────────────────────
+CONTOH 1: Scan file Terraform yang insecure (demo violations)
+──────────────────────────────────────────────────────────────────────────────
+  python cli.py validate examples/insecure/main.tf
+
+  OUTPUT YANG DIHARAPKAN:
+  ================================================================
+    PolicyEngine Validation Report
+  ================================================================
+    File: examples/insecure/main.tf
+
+    [CHECKOV]  12 failed, 8 passed
+    [OPA]       5 violations, 0 passed
+
+    CRITICAL (3):
+      ✗ Security group 'web' allows SSH (port 22) from anywhere
+        → Ganti cidr_blocks dari ["0.0.0.0/0"] menjadi IP range spesifik.
+      ✗ RDS instance 'database' has publicly accessible enabled
+        → Set publicly_accessible = false.
+      ✗ IAM policy 'overprivileged' uses wildcard Action ('*')
+        → Specify explicit actions following least-privilege principle.
+
+    HIGH (4):
+      ✗ RDS instance 'database' has storage_encrypted = false
+      ...
+
+  ================================================================
+    RESULT: ⛔ FAILED — 3 critical, 4 high violation(s) found
+    Deployment BLOCKED. Fix violations above before deploying.
+  ================================================================
+
+    Reports saved:
+      JSON: reports\validation_report.json
+      HTML: reports\validation_report.html
+
+
+──────────────────────────────────────────────────────────────────────────────
+CONTOH 2: Scan file Terraform yang secure (seharusnya PASS)
+──────────────────────────────────────────────────────────────────────────────
+  python cli.py validate examples/secure/main.tf
+
+  OUTPUT:
+  ================================================================
+    RESULT: ✅ PASSED — 0 total violation(s), none blocking
+    Deployment ALLOWED.
+  ================================================================
+
+
+──────────────────────────────────────────────────────────────────────────────
+CONTOH 3: Scan Docker Compose
+──────────────────────────────────────────────────────────────────────────────
+  python cli.py validate examples/insecure/docker-compose.yml
+
+
+──────────────────────────────────────────────────────────────────────────────
+CONTOH 4: Gunakan policy directory custom
+──────────────────────────────────────────────────────────────────────────────
+  python cli.py validate main.tf --policy-dir custom_policies/
+
+  Berguna jika kamu menyimpan policy Rego di folder berbeda.
+
+
+──────────────────────────────────────────────────────────────────────────────
+CONTOH 5: Simpan report ke direktori tertentu
+──────────────────────────────────────────────────────────────────────────────
+  python cli.py validate main.tf --output-dir D:\reports\$(Get-Date -Format yyyy-MM-dd)\
+
+
+──────────────────────────────────────────────────────────────────────────────
+CONTOH 6: Mode quiet — untuk CI/CD (tidak ada output, hanya exit code)
+──────────────────────────────────────────────────────────────────────────────
+  python cli.py validate main.tf --quiet
+  echo $LASTEXITCODE
+
+  # 0 = PASS (aman untuk deploy)
+  # 1 = FAIL (ada CRITICAL/HIGH, blokir deployment)
+
+  Mode ini didesain untuk pipeline otomatis dimana output teks tidak diperlukan.
+
+
+──────────────────────────────────────────────────────────────────────────────
+CONTOH 7: Aktifkan AI remediation (butuh Ollama)
+──────────────────────────────────────────────────────────────────────────────
+  python cli.py validate main.tf --ai
+
+  AI akan generate saran yang lebih spesifik per violation.
+  Lihat bagian 12 untuk cara setup Ollama.
+
+
+SEMUA OPSI CLI:
+  Argumen       Tipe      Default     Keterangan
+  ─────────────────────────────────────────────────────────────────
+  file          positional  (wajib)   Path ke file yang akan di-scan
+  --policy-dir  string    policies/   Folder berisi file .rego
+  --output-dir  string    reports/    Folder untuk simpan report
+  --ai          flag      False       Aktifkan AI remediation
+  --quiet / -q  flag      False       Suppress output, exit code only
+
+================================================================================
+  7. CARA MENGGUNAKAN — WEB UI
+================================================================================
+
+STEP 1: Jalankan web server
+─────────────────────────────
+  Dari folder policyengine/:
+
+    python run.py
+
+  Output:
+  ============================================================
+    PolicyEngine Web UI
+    http://localhost:8000
+  ============================================================
+
+STEP 2: Buka browser
+──────────────────────
+  Navigasi ke: http://localhost:8000
+
+  Kamu akan melihat halaman upload dengan:
+  - Drop zone untuk drag-and-drop file
+  - Tombol browse file
+  - Checkbox AI remediation (opsional)
+  - Tombol "Validate File"
+
+STEP 3: Upload file IaC
+─────────────────────────
+  a) Drag-and-drop file .tf atau .yml ke area yang tersedia
+     ATAU klik area tersebut → pilih file dari Explorer
+
+  b) (Opsional) Centang "Enable AI remediation" jika Ollama berjalan
+
+  c) Klik tombol "🔍 Validate File"
+
+  d) Tunggu proses scan (biasanya 5-30 detik tergantung ukuran file)
+
+STEP 4: Baca hasil di halaman report
+──────────────────────────────────────
+  Halaman report menampilkan:
+
+  BANNER BESAR:
+  - ✅ HIJAU = PASSED (boleh deploy)
+  - 🚫 MERAH = FAILED (deployment diblokir)
+
+  SUMMARY CARDS:
+  - Total violations
+  - Breakdown per severity (Critical / High / Medium / Low)
+
+  SCANNER SUMMARY:
+  - Checkov: berapa check passed / failed
+  - OPA: berapa violations / passed
+
+  TABEL VIOLATIONS:
+  - Kolom: Severity | Scanner | Check ID | Resource | Message | Fix
+  - Klik "View →" di kolom Fix untuk expand remediation detail
+  - Remediation detail berisi: penjelasan + code snippet + link referensi
+
+  DOWNLOAD:
+  - Klik "⬇ Download JSON" untuk unduh validation_report.json
+
+STEP 5: Hentikan web server
+─────────────────────────────
+  Tekan Ctrl+C di terminal tempat python run.py berjalan.
+
+================================================================================
+  8. CARA MENGGUNAKAN — API (Untuk Developer)
+================================================================================
+
+PolicyEngine menyediakan REST API melalui FastAPI.
+Dokumentasi interaktif tersedia di: http://localhost:8000/docs
+
+ENDPOINT 1: GET /
+  Deskripsi : Halaman upload (HTML)
+  Response  : text/html
+
+ENDPOINT 2: POST /validate
+  Deskripsi : Upload dan validasi file
+  Body      : multipart/form-data
+    - file    : file yang diupload (wajib)
+    - use_ai  : boolean (opsional, default false)
+  Response  : text/html (halaman report)
+
+ENDPOINT 3: GET /api/validate
+  Deskripsi : Validasi file yang sudah ada di server, return JSON
+  Parameter :
+    - file_path : path ke file (wajib)
+    - policy_dir: path ke folder policy (default: policies/)
+    - use_ai    : boolean (default: false)
+  Response  : application/json
+
+  Contoh curl:
+    curl "http://localhost:8000/api/validate?file_path=examples/insecure/main.tf"
+
+  Contoh Python:
+    import httpx
+    r = httpx.get("http://localhost:8000/api/validate",
+                  params={"file_path": "examples/insecure/main.tf"})
+    data = r.json()
+    print(data["allow_deploy"])    # True atau False
+    print(data["total_violations"])
+    for f in data["findings"]:
+        print(f["severity"], f["message"])
+
+ENDPOINT 4: GET /download-report
+  Deskripsi : Download report JSON terakhir
+  Response  : application/json (file download)
+
+ENDPOINT 5: GET /health
+  Deskripsi : Health check (untuk monitoring)
+  Response  : {"status": "ok", "service": "PolicyEngine"}
+
+================================================================================
+  9. MEMAHAMI HASIL VALIDASI
+================================================================================
+
+SEVERITY LEVELS:
+  CRITICAL  → Harus diperbaiki sebelum deploy. Contoh:
+              - SSH/RDP terbuka ke 0.0.0.0/0
+              - Database publicly accessible
+              - Container privileged mode
+              - IAM wildcard action (*)
+
+  HIGH      → Risiko tinggi, perlu diperbaiki sebelum production. Contoh:
+              - Enkripsi storage tidak diaktifkan
+              - Container running as root
+              - Hardcoded password di environment
+              - IAM wildcard resource
+
+  MEDIUM    → Best practice yang dianjurkan, tidak wajib segera. Contoh:
+              - Resource tanpa tags
+              - Tidak ada versioning di S3
+              - Tidak ada resource limits di container
+              - Logging tidak diaktifkan
+
+  LOW       → Penyempurnaan opsional. Contoh:
+              - Deskripsi security group kosong
+              - Naming convention tidak konsisten
+
+KEPUTUSAN DEPLOY:
+  allow_deploy = True   → Hanya ada MEDIUM/LOW violations (atau tidak ada sama sekali)
+  allow_deploy = False  → Ada minimal 1 CRITICAL atau HIGH violation
+
+  CLI: exit code 0 (allow) atau 1 (block)
+  CI/CD: exit code 1 secara otomatis menggagalkan pipeline
+
+FORMAT FINDING (JSON):
+  {
+    "scanner": "checkov",              ← "checkov" atau "opa"
+    "check_id": "CKV_AWS_19",         ← ID check Checkov atau OPA-CUSTOM
+    "severity": "HIGH",               ← CRITICAL/HIGH/MEDIUM/LOW
+    "resource": "aws_s3_bucket.data", ← resource yang bermasalah
+    "file": "/path/to/main.tf",       ← file tempat resource ditemukan
+    "message": "S3 bucket ... ",      ← deskripsi masalah
+    "status": "FAILED",               ← selalu FAILED untuk violations
+    "remediation": {
+      "title": "Enable S3 encryption",
+      "fix": "Tambahkan block ...",    ← penjelasan perbaikan
+      "terraform_snippet": "...",     ← kode yang perlu ditambahkan
+      "references": ["https://..."]   ← link dokumentasi
+    }
+  }
+
+================================================================================
+  10. MENULIS POLICY CUSTOM (OPA / REGO)
+================================================================================
+
+Policy custom menggunakan bahasa Rego dari Open Policy Agent.
+File .rego ditaruh di folder policies/ (atau folder custom dengan --policy-dir).
+
+STRUKTUR DASAR FILE REGO:
+─────────────────────────────
+  package terraform.nama_package   ← nama package (bebas, tapi konsisten)
+
+  import future.keywords.in        ← import keyword modern OPA
+
+  deny[msg] {                      ← deny rule: jika blok ini true → violation
+      # kondisi-kondisi yang diperiksa
+      msg := "pesan violation"     ← pesan yang ditampilkan ke user
+  }
+
+CARA REGO MEMBACA FILE TERRAFORM:
+──────────────────────────────────
+  conftest mem-parse file .tf ke JSON, lalu menyebutnya sebagai "input".
+
+  Untuk resource Terraform:
+    resource "aws_s3_bucket" "data" { ... }
+  Dibaca sebagai:
+    input.resource.aws_s3_bucket["data"]
+
+  Untuk property di dalam resource:
+    resource.server_side_encryption_configuration
+    resource.tags.Environment
+    resource.ingress[_].cidr_blocks[_]   ← [_] = iterasi semua element
+
+CARA REGO MEMBACA FILE DOCKER COMPOSE:
+────────────────────────────────────────
+  services:
+    app:
+      privileged: true
+  Dibaca sebagai:
+    input.services["app"].privileged
+
+CONTOH 1: Deny S3 bucket tanpa enkripsi
+──────────────────────────────────────────
+  package terraform.my_custom_rules
+
+  deny[msg] {
+      resource := input.resource.aws_s3_bucket[name]
+      not resource.server_side_encryption_configuration
+      msg := sprintf("S3 bucket '%v' tidak memiliki enkripsi!", [name])
+  }
+
+CONTOH 2: Deny container tanpa health check
+─────────────────────────────────────────────
+  package docker.my_custom_rules
+
+  deny[msg] {
+      service := input.services[name]
+      not service.healthcheck
+      msg := sprintf("Service '%v' tidak memiliki healthcheck", [name])
+  }
+
+CONTOH 3: Deny EC2 instance dengan instance type yang tidak diizinkan
+───────────────────────────────────────────────────────────────────────
+  package terraform.cost_control
+
+  allowed_instance_types := {"t3.micro", "t3.small", "t3.medium"}
+
+  deny[msg] {
+      resource := input.resource.aws_instance[name]
+      not allowed_instance_types[resource.instance_type]
+      msg := sprintf(
+          "EC2 '%v' menggunakan instance type '%v' yang tidak diizinkan",
+          [name, resource.instance_type]
+      )
+  }
+
+MENJALANKAN DENGAN POLICY CUSTOM:
+────────────────────────────────────
+  # Tambahkan .rego baru ke policies/
+  # Tidak perlu restart apapun — conftest baca ulang tiap run
+
+  python cli.py validate main.tf
+  # Policy baru langsung aktif
+
+TESTING POLICY SECARA TERPISAH (tanpa PolicyEngine):
+──────────────────────────────────────────────────────
+  conftest test examples/insecure/main.tf --policy policies/ --output json
+
+================================================================================
+  11. INTEGRASI CI/CD (GITHUB ACTIONS)
+================================================================================
+
+CARA KERJA:
+  - Setiap push ke repository → pipeline GitHub Actions jalan
+  - PolicyEngine scan file Terraform/Compose di repository
+  - Jika ada CRITICAL/HIGH → exit code 1 → pipeline FAIL → PR tidak bisa di-merge
+
+FILE: .github/workflows/policyengine.yml
+─────────────────────────────────────────
+  name: IaC Security Validation
+
+  on:
+    push:
+      paths:
+        - '**.tf'
+        - '**/docker-compose.yml'
+    pull_request:
+      paths:
+        - '**.tf'
+        - '**/docker-compose.yml'
+
+  jobs:
+    policy-check:
+      runs-on: ubuntu-latest
+      steps:
+        - name: Checkout code
+          uses: actions/checkout@v4
+
+        - name: Set up Python 3.11
+          uses: actions/setup-python@v4
+          with:
+            python-version: '3.11'
+
+        - name: Install PolicyEngine dependencies
+          run: |
+            pip install checkov jinja2 httpx
+
+        - name: Install conftest
+          run: |
+            wget -q https://github.com/open-policy-agent/conftest/releases/download/v0.46.0/conftest_0.46.0_Linux_x86_64.tar.gz
+            tar xzf conftest_0.46.0_Linux_x86_64.tar.gz
+            sudo mv conftest /usr/local/bin/
+            conftest --version
+
+        - name: Run PolicyEngine
+          run: |
+            cd policyengine
+            python cli.py validate examples/insecure/main.tf --quiet
+          # Exit code 1 otomatis gagalkan pipeline jika ada CRITICAL/HIGH
+
+        - name: Upload Report
+          if: always()   # upload report meskipun pipeline gagal
+          uses: actions/upload-artifact@v3
+          with:
+            name: policyengine-report
+            path: policyengine/reports/
+
+PRE-COMMIT HOOK (cek sebelum git commit):
+──────────────────────────────────────────
+  Buat file: .git/hooks/pre-commit
+  Isi:
+    #!/bin/sh
+    echo "Running PolicyEngine security check..."
+    cd /path/to/policyengine
+    python cli.py validate infra/main.tf --quiet
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -ne 0 ]; then
+        echo ""
+        echo "❌ PolicyEngine: Security violations found!"
+        echo "   Run 'python cli.py validate infra/main.tf' untuk detail."
+        echo "   Perbaiki violations sebelum commit."
+        exit 1
+    fi
+    echo "✅ PolicyEngine: IaC security check passed."
+
+  chmod +x .git/hooks/pre-commit
+
+================================================================================
+  12. FITUR AI REMEDIATION (OPSIONAL)
+================================================================================
+
+PolicyEngine dapat menggunakan Ollama untuk generate saran perbaikan
+yang lebih spesifik dan kontekstual per violation.
+
+TANPA AI: Template statis tersedia untuk 13+ jenis violation umum.
+DENGAN AI: Ollama generate penjelasan yang lebih detail per kasus.
+
+SETUP OLLAMA:
+─────────────
+  1. Download Ollama dari: https://ollama.com
+     Windows installer tersedia di website tersebut.
+
+  2. Install model yang ringan:
+     ollama pull llama3.2:3b
+     (ukuran sekitar 2GB, perlu VRAM/RAM minimal 4GB)
+
+  3. Jalankan Ollama service:
+     ollama serve
+     # Berjalan di http://localhost:11434
+
+  4. Verifikasi:
+     curl http://localhost:11434/api/tags
+
+GUNAKAN AI REMEDIATION:
+  python cli.py validate main.tf --ai
+  # Setiap violation akan mendapat saran tambahan dari Ollama
+
+FALLBACK OTOMATIS:
+  Jika Ollama tidak berjalan atau timeout (>10 detik),
+  PolicyEngine otomatis kembali ke template statis.
+  Tidak ada error, tidak ada crash.
+
+================================================================================
+  13. TROUBLESHOOTING
+================================================================================
+
+MASALAH: "checkov: command not found"
+SOLUSI:
+  pip install checkov
+  # Pastikan pip dan checkov ada di PATH yang sama
+  # Di Windows: pip install --user checkov → mungkin perlu restart terminal
+
+MASALAH: "conftest_not_found"
+SOLUSI:
+  1. Download conftest.exe dari:
+     https://github.com/open-policy-agent/conftest/releases
+  2. Taruh di folder yang ada di PATH
+     Cek PATH: $env:PATH -split ";" (PowerShell)
+  3. Verifikasi: conftest --version
+  Catatan: PolicyEngine tetap berjalan dengan Checkov saja walau conftest tidak ada.
+
+MASALAH: Checkov mengembalikan output kosong / tidak ada findings
+SOLUSI:
+  - Pastikan file .tf adalah Terraform valid (syntax benar)
+  - Jalankan manual: checkov -f main.tf --output json
+  - Cek apakah file mengandung resource block (bukan hanya provider/terraform block)
+
+MASALAH: Policy Rego tidak menghasilkan violations padahal ada vuln
+SOLUSI:
+  a) Test policy secara terpisah:
+     conftest test examples/insecure/main.tf --policy policies/ --trace
+     (--trace menampilkan evaluasi step by step)
+
+  b) Verifikasi struktur input:
+     conftest parse examples/insecure/main.tf
+     (tampilkan JSON yang dilihat Rego, bandingkan dengan kondisi di policy)
+
+  c) Cek package name di .rego harus konsisten
+     Untuk Terraform: package terraform.xxx
+     Untuk Docker Compose: package docker.xxx
+
+MASALAH: Web UI menampilkan "Internal Server Error"
+SOLUSI:
+  1. Lihat log di terminal tempat python run.py berjalan
+  2. Pastikan folder reports/ dan uploads/ ada (dibuat otomatis, tapi cek)
+  3. Pastikan file yang diupload adalah .tf atau .yml yang valid
+
+MASALAH: Port 8000 sudah digunakan
+SOLUSI:
+  Edit run.py, ubah port=8000 menjadi port=8001 (atau port lain)
+  Kemudian akses http://localhost:8001
+
+MASALAH: Import error saat jalankan cli.py
+SOLUSI:
+  Pastikan kamu ada di dalam folder policyengine/:
+    cd "D:\Portofolio Cyber Alif\project 13 - Policy Enginer\policyengine"
+    python cli.py validate ...
+
+  Jangan jalankan dari folder parent.
+
+MASALAH: HTML report tidak terbuka dengan benar di browser
+SOLUSI:
+  Buka langsung dari terminal:
+    start reports\validation_report.html    (Windows)
+  Atau gunakan Web UI yang langsung menampilkan di browser.
+
+================================================================================
+  14. REFERENSI DAN SUMBER BELAJAR
+================================================================================
+
+DOKUMENTASI TOOLS:
+  Checkov        → https://www.checkov.io/
+  Checkov checks → https://www.checkov.io/5.Policy%20Index/terraform.html
+  Open Policy Agent → https://www.openpolicyagent.org/docs/latest/
+  Rego language  → https://www.openpolicyagent.org/docs/latest/policy-language/
+  conftest       → https://www.conftest.dev/
+  Ollama         → https://ollama.com/
+
+SECURITY BENCHMARKS YANG DIIMPLEMENTASIKAN:
+  CIS AWS Foundations Benchmark → https://www.cisecurity.org/benchmark/amazon_web_services
+  AWS Security Best Practices   → https://docs.aws.amazon.com/security/
+  NIST CSF                      → https://www.nist.gov/cyberframework
+  Docker Security Best Practices → https://docs.docker.com/engine/security/
+
+TERRAFORM RESOURCES YANG DICEK:
+  aws_s3_bucket              → https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket
+  aws_security_group         → https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group
+  aws_iam_policy             → https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_policy
+  aws_db_instance            → https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/db_instance
+  aws_ebs_volume             → https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ebs_volume
+
+BELAJAR IaC SECURITY:
+  OWASP IaC Security Cheat Sheet → https://cheatsheetseries.owasp.org/cheatsheets/Infrastructure_as_Code_Security_Cheat_Sheet.html
+  tfsec rules                    → https://aquasecurity.github.io/tfsec/
+  Snyk IaC                       → https://snyk.io/product/infrastructure-as-code-security/
+
+================================================================================
+  RINGKASAN PERINTAH PENTING
+================================================================================
+
+  # Scan insecure demo
+  python cli.py validate examples/insecure/main.tf
+
+  # Scan docker compose
+  python cli.py validate examples/insecure/docker-compose.yml
+
+  # Scan secure demo (perbandingan)
+  python cli.py validate examples/secure/main.tf
+
+  # Web UI
+  python run.py
+  # Buka http://localhost:8000
+
+  # CI/CD mode (hanya exit code)
+  python cli.py validate infra/main.tf --quiet && echo "DEPLOY OK" || echo "DEPLOY BLOCKED"
+
+  # Lihat report HTML
+  start reports\validation_report.html
+
+================================================================================
+  END OF PANDUAN
+================================================================================

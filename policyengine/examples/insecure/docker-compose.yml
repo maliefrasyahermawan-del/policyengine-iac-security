@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  app:
+    image: myapp:latest
+    privileged: true              # VULN: privileged mode — full host access
+    user: root                    # VULN: explicit root user
+    ports:
+      - "0.0.0.0:8080:8080"      # VULN: bind to all interfaces
+      - "0.0.0.0:9090:9090"
+    # MISSING: deploy.resources.limits — no CPU/memory limits
+    # MISSING: read_only: true — writable filesystem
+    # MISSING: security_opt: no-new-privileges
+    environment:
+      - DB_PASSWORD=hardcoded123  # VULN: hardcoded password in env
+      - API_SECRET=mysecretkey456 # VULN: hardcoded secret in env
+      - NODE_ENV=production
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock  # VULN: docker socket mounted
+      - ./data:/app/data
+
+  database:
+    image: postgres:14
+    user: root                    # VULN: postgres running as root
+    ports:
+      - "0.0.0.0:5432:5432"      # VULN: database port exposed publicly
+    environment:
+      - POSTGRES_PASSWORD=weakpassword123  # VULN: hardcoded db password
+      - POSTGRES_DB=myapp
+    # MISSING: resource limits
+    # MISSING: healthcheck
+
+  nginx:
+    image: nginx:latest
+    network_mode: "host"          # VULN: host network mode bypasses isolation
+    privileged: true              # VULN: nginx does not need privileged
+    ports:
+      - "80:80"
+      - "443:443"
+    # MISSING: resource limits
+    # MISSING: read_only filesystem

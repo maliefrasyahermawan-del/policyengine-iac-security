@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>PolicyEngine — IaC Security Validation</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gradient-to-br from-gray-900 to-gray-800 min-h-screen flex items-center justify-center font-sans">
+
+  <div class="w-full max-w-2xl mx-4">
+
+    <!-- Logo / Header -->
+    <div class="text-center mb-10">
+      <div class="text-6xl mb-3">🛡️</div>
+      <h1 class="text-4xl font-bold text-white mb-2">PolicyEngine</h1>
+      <p class="text-gray-400 text-lg">Infrastructure as Code Security Validation</p>
+      <p class="text-gray-500 text-sm mt-1">Scan Terraform &amp; Docker Compose files before deploying</p>
+    </div>
+
+    <!-- Upload Card -->
+    <div class="bg-white rounded-2xl shadow-2xl p-8">
+      <form method="post" action="/validate" enctype="multipart/form-data" id="uploadForm">
+
+        <!-- Drop Zone -->
+        <div id="dropZone"
+             class="border-2 border-dashed border-gray-300 rounded-xl p-10 text-center cursor-pointer hover:border-blue-500 hover:bg-blue-50 transition-all mb-6"
+             onclick="document.getElementById('fileInput').click()">
+          <div class="text-4xl mb-3" id="dropIcon">📂</div>
+          <p class="text-gray-600 font-medium" id="dropText">Drop your IaC file here or click to browse</p>
+          <p class="text-gray-400 text-sm mt-1">Supports: .tf (Terraform) · .yml/.yaml (Docker Compose)</p>
+          <input type="file" id="fileInput" name="file" accept=".tf,.yml,.yaml,.hcl" class="hidden"
+                 onchange="handleFileSelect(this)"/>
+        </div>
+
+        <!-- Options -->
+        <div class="flex items-center gap-3 mb-6">
+          <input type="checkbox" name="use_ai" id="useAi" value="true"
+                 class="w-4 h-4 text-blue-600 rounded"/>
+          <label for="useAi" class="text-sm text-gray-600">
+            Enable AI remediation suggestions (requires Ollama running locally)
+          </label>
+        </div>
+
+        <!-- Submit -->
+        <button type="submit"
+                class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-xl transition-colors text-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                id="submitBtn" disabled>
+          🔍 Validate File
+        </button>
+
+      </form>
+
+      <!-- Loading state -->
+      <div id="loadingState" class="hidden text-center mt-6">
+        <div class="inline-flex items-center gap-3 text-gray-600">
+          <svg class="animate-spin w-5 h-5 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+          </svg>
+          <span>Running security checks...</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Features -->
+    <div class="grid grid-cols-3 gap-4 mt-8">
+      <div class="bg-gray-800 rounded-xl p-4 text-center">
+        <div class="text-2xl mb-2">🔍</div>
+        <div class="text-white text-sm font-medium">Checkov Scanner</div>
+        <div class="text-gray-400 text-xs mt-1">1000+ built-in checks</div>
+      </div>
+      <div class="bg-gray-800 rounded-xl p-4 text-center">
+        <div class="text-2xl mb-2">📋</div>
+        <div class="text-white text-sm font-medium">OPA Policies</div>
+        <div class="text-gray-400 text-xs mt-1">Custom Rego rules</div>
+      </div>
+      <div class="bg-gray-800 rounded-xl p-4 text-center">
+        <div class="text-2xl mb-2">🛠️</div>
+        <div class="text-white text-sm font-medium">Remediation</div>
+        <div class="text-gray-400 text-xs mt-1">Fix suggestions</div>
+      </div>
+    </div>
+
+    <p class="text-center text-gray-600 text-xs mt-6">
+      PolicyEngine — Shift-Left Security for Infrastructure
+    </p>
+  </div>
+
+  <script>
+    function handleFileSelect(input) {
+      const file = input.files[0];
+      if (file) {
+        document.getElementById('dropIcon').textContent = '✅';
+        document.getElementById('dropText').textContent = file.name;
+        document.getElementById('dropText').className = 'text-blue-600 font-semibold';
+        document.getElementById('submitBtn').disabled = false;
+      }
+    }
+
+    document.getElementById('uploadForm').addEventListener('submit', function() {
+      document.getElementById('loadingState').classList.remove('hidden');
+      document.getElementById('submitBtn').disabled = true;
+    });
+
+    const dropZone = document.getElementById('dropZone');
+    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('border-blue-500', 'bg-blue-50'); });
+    dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('border-blue-500', 'bg-blue-50'); });
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('border-blue-500', 'bg-blue-50');
+      const file = e.dataTransfer.files[0];
+      if (file) {
+        const input = document.getElementById('fileInput');
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files;
+        handleFileSelect(input);
+      }
+    });
+  </script>
+</body>
+</html>
